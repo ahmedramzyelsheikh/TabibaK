@@ -77,7 +77,7 @@ This repository contains the **backend REST API**, built with ASP.NET Core 8 and
 | Feature | How it works |
 |:--|:--|
 | 🤖 **AI specialty matching** | Symptoms go to an external ML service (Hugging Face Space); the API returns the recommended specialty plus matching doctors |
-| 💬 **Real-time chat** | REST + SignalR hub at `/hubs/chat` with **delivered** and **read** receipts, editing and deleting messages |
+| 💬 **Chat** | Conversations over REST with editing and deleting; **delivered** and **read** receipts pushed live through SignalR (`/hubs/chat`) |
 | 💊 **Digital prescriptions** | Itemized prescriptions from an **Egyptian medicine database** imported from Excel (ClosedXML) |
 | 📍 **Nearby doctors** | Geo-search with **NetTopologySuite** (SQL Server spatial) to find doctors close to the patient |
 | 🔒 **Security** | JWT access tokens + **refresh tokens**, **claims-based** permissions, OTP-based password reset and email verification |
@@ -92,19 +92,19 @@ This repository contains the **backend REST API**, built with ASP.NET Core 8 and
 - ⏰ **Email reminders** before upcoming appointments
 - 📄 **Prescriptions**: view current and past prescriptions, including digital ones
 - 🧪 **Lab tests & medical records** with downloadable file attachments
-- 💬 **Chat** with your doctor in real time
+- 💬 **Chat** with your doctor, with delivered and read receipts
 - 💳 **Payment records** for consultations
 - 📰 **Health content**: read doctors' advice posts and watch advice videos
 
 ### 👨‍⚕️ Doctor
 
-- 🗓️ **Schedule management**: working days and hours, checked automatically when patients book
+- 🗓️ **Schedule management**: working days, hours and slot length; bookings outside them, or within 20 minutes of another appointment, are rejected
 - 📊 **Dashboard**: today's appointments, recent patients, statistics, ratings and earnings
 - 🏥 **Patient records**: medical history, diagnoses, lab tests and files
 - 💊 **Prescriptions**: classic and digital prescriptions from the medicine catalog
 - 📰 **Advice posts**: publish posts that patients can like, comment on and save
 - 🎥 **Advice videos**: upload educational videos
-- 💬 **Real-time chat** with patients
+- 💬 **Chat** with patients
 - ⭐ **Ratings & reviews** from patients
 
 ### 🛡️ Admin
@@ -220,142 +220,900 @@ TabibaK/
 
 ## 🧩 UML Diagrams
 
-<details open>
-<summary><b>Class diagram</b></summary>
+### 🗂️ Class Diagram
 
-<p align="center"><img src="Imagse/UML_Class_Diagram.png" alt="UML class diagram" width="95%" /></p>
+The domain has **25 entities** in five areas. The map shows how they connect; open an area below for its classes, fields and multiplicities.
+
+```mermaid
+flowchart TB
+    subgraph USERS["👥 Users & auth"]
+        AU["ApplicationUser"]
+        DOC["Doctor"]
+        PAT["Patient"]
+        RT["RefreshToken"]
+        SCH["DoctorSchedule"]
+        ERN["DoctorEarning"]
+        AU -->|"0..1"| DOC
+        AU -->|"0..1"| PAT
+        AU -->|"0..*"| RT
+        DOC -->|"0..*"| SCH
+        DOC -->|"0..*"| ERN
+    end
+
+    subgraph APPT["📅 Appointments"]
+        AP["Appointment"]
+        PAY["Payment"]
+        RAT["DoctorRating"]
+        AP -->|"0..1"| PAY
+        AP -->|"0..1"| RAT
+    end
+
+    subgraph CLIN["🏥 Clinical"]
+        MR["MedicalRecord"]
+        RX["Prescription"]
+        DRX["DigitalPrescription"]
+        DRXI["DigitalPrescriptionItem"]
+        MED["Medicine"]
+        LAB["Testing (lab result)"]
+        MR -->|"0..*"| RX
+        MR -->|"0..*"| DRX
+        MR -->|"0..*"| LAB
+        DRX -->|"0..*"| DRXI
+        DRXI -.->|"picked from"| MED
+    end
+
+    subgraph CONT["📰 Content"]
+        POST["DoctorAdvicePost"]
+        VID["DoctorAdviceVideo"]
+        LIKE["AdviceLike"]
+        COM["AdviceComment"]
+        SAVE["SavedPost"]
+        POST -->|"0..*"| LIKE
+        POST -->|"0..*"| COM
+        POST -->|"0..*"| SAVE
+    end
+
+    subgraph CHAT["💬 Chat"]
+        CONV["Conversation"]
+        MSG["Message"]
+        MS["MessageStatus"]
+        CALL["Call"]
+        CONV -->|"0..*"| MSG
+        MSG -->|"0..* per recipient"| MS
+        CONV -->|"0..*"| CALL
+    end
+
+    PAT -->|"books 0..*"| AP
+    DOC -->|"attends 0..*"| AP
+    AP -->|"0..1"| MR
+    PAT -->|"owns 0..1"| MR
+    DOC -->|"writes 0..*"| MR
+    DOC -->|"publishes"| CONT
+    USERS -->|"patient ↔ doctor"| CHAT
+
+    classDef user fill:#E3F2FD,stroke:#1E88E5,color:#0D47A1
+    classDef appt fill:#FFF3E0,stroke:#FB8C00,color:#E65100
+    classDef clin fill:#E8F5E9,stroke:#43A047,color:#1B5E20
+    classDef cont fill:#F3E5F5,stroke:#8E24AA,color:#4A148C
+    classDef chat fill:#E0F7FA,stroke:#00ACC1,color:#006064
+    class AU,DOC,PAT,RT,SCH,ERN user
+    class AP,PAY,RAT appt
+    class MR,RX,DRX,DRXI,MED,LAB clin
+    class POST,VID,LIKE,COM,SAVE cont
+    class CONV,MSG,MS,CALL chat
+```
+
+<details>
+<summary><b>👥 Users & authentication</b></summary>
+
+```mermaid
+classDiagram
+    direction LR
+    class ApplicationUser {
+        <<IdentityUser>>
+        +string Id
+        +string FullName
+        +string Email
+        +string Gender
+        +DateTime DateOfBirth
+        +DateTime DateOfRegistration
+        +Point Location
+        +string ProfileImageUrl
+    }
+    class RefreshToken {
+        +int Id
+        +string Token
+        +DateTime CreatedOn
+        +DateTime ExpiresOn
+        +DateTime RevokedOn
+    }
+    class Doctor {
+        +string Id
+        +string Specialization
+        +string IdNo
+        +string IdImageFrontUrl
+        +string IdImageBackUrl
+        +decimal Price
+        +bool IsAvailable
+        +decimal Rating
+        +int RatingCount
+        +string RejectionReason
+    }
+    class Patient {
+        +string Id
+    }
+    class DoctorSchedule {
+        +int Id
+        +DayOfWeek DayOfWeek
+        +TimeSpan StartTime
+        +TimeSpan EndTime
+        +int SlotDurationMinutes
+        +bool IsActive
+    }
+    class DoctorEarning {
+        +int Id
+        +DateTime Date
+        +decimal DailyEarnings
+        +int AppointmentCount
+    }
+    ApplicationUser "1" -- "0..1" Doctor : shared key
+    ApplicationUser "1" -- "0..1" Patient : shared key
+    ApplicationUser "1" --> "*" RefreshToken
+    Doctor "1" --> "*" DoctorSchedule
+    Doctor "1" --> "*" DoctorEarning
+```
 
 </details>
 
 <details>
-<summary><b>Use case diagram</b></summary>
+<summary><b>📅 Appointments, payments & ratings</b></summary>
 
-<p align="center"><img src="Imagse/UML_UseCase_Diagram.png" alt="UML use case diagram" width="90%" /></p>
+```mermaid
+classDiagram
+    direction LR
+    class Appointment {
+        +Guid AppointmentID
+        +DateOnly AppointmentDate
+        +TimeSpan AppointmentTime
+        +AppointmentStatus AppointmentStatus
+        +string AdditionalNotes
+        +DateTimeOffset ReminderAt
+        +bool ReminderSent
+    }
+    class AppointmentStatus {
+        <<enumeration>>
+        Pending
+        Rescheduled
+        Canceled
+        Completed
+    }
+    class Payment {
+        +int PaymentID
+        +DateTime PaymentDate
+        +float AmountPaid
+        +string AdditionalNotes
+    }
+    class DoctorRating {
+        +int Id
+        +byte Rating
+        +string Comment
+        +DateTime CreatedAt
+    }
+    Patient "1" --> "*" Appointment : books
+    Doctor "1" --> "*" Appointment : attends
+    Appointment ..> AppointmentStatus
+    Appointment "1" --> "0..1" Payment
+    Appointment "1" --> "0..1" DoctorRating
+    Doctor "1" --> "*" DoctorRating
+    Patient "1" --> "*" DoctorRating : gives
+```
 
 </details>
+
+<details>
+<summary><b>🏥 Clinical: records, prescriptions & lab tests</b></summary>
+
+```mermaid
+classDiagram
+    direction LR
+    class MedicalRecord {
+        +Guid MedicalRecordId
+    }
+    class Prescription {
+        +Guid PrescriptionId
+        +string Title
+        +string FilePath
+        +string FileType
+        +PrescriptionStatus Status
+    }
+    class PrescriptionStatus {
+        <<enumeration>>
+        StillUnderDoctor
+        Finished
+    }
+    class DigitalPrescription {
+        +Guid DigitalPrescriptionId
+        +DateTime CreatedAt
+    }
+    class DigitalPrescriptionItem {
+        +Guid DigitalPrescriptionItemId
+        +string MedicineName
+        +int PerDay
+        +string Spotlights
+    }
+    class Testing {
+        +Guid TestingId
+        +string Title
+        +DateTime DateExam
+        +string FilePath
+        +string FileType
+    }
+    class Medicine {
+        +int Id
+        +string Name
+        +string ArabicName
+        +string ActiveIngredient
+        +string Company
+        +string Price
+    }
+    Patient "1" --> "0..1" MedicalRecord : owns
+    Doctor "1" --> "*" MedicalRecord : writes
+    Appointment "0..1" --> "0..1" MedicalRecord
+    MedicalRecord "1" *-- "*" Prescription : file prescriptions
+    MedicalRecord "1" *-- "*" DigitalPrescription
+    MedicalRecord "1" *-- "*" Testing : lab results
+    DigitalPrescription "1" *-- "*" DigitalPrescriptionItem
+    DigitalPrescriptionItem ..> Medicine : picked from catalog
+    Prescription ..> PrescriptionStatus
+```
+
+</details>
+
+<details>
+<summary><b>📰 Health content: posts & videos</b></summary>
+
+```mermaid
+classDiagram
+    direction LR
+    class DoctorAdvicePost {
+        +Guid Id
+        +string Content
+        +string ImageUrl
+        +DateTime CreatedAt
+        +bool IsPublished
+    }
+    class DoctorAdviceVideo {
+        +Guid Id
+        +string Title
+        +string Description
+        +string VideoUrl
+        +DateTime CreatedAt
+        +bool IsPublished
+    }
+    class AdviceLike {
+        +int Id
+        +DateTime CreatedAt
+    }
+    class AdviceComment {
+        +long Id
+        +string Content
+        +DateTime CreatedAt
+        +DateTime EditedAt
+        +bool IsDeleted
+    }
+    class SavedPost {
+        +Guid Id
+        +DateTime SavedAt
+    }
+    Doctor "1" --> "*" DoctorAdvicePost : publishes
+    Doctor "1" --> "*" DoctorAdviceVideo : uploads
+    DoctorAdvicePost "1" *-- "*" AdviceLike
+    DoctorAdvicePost "1" *-- "*" AdviceComment
+    DoctorAdvicePost "1" <-- "*" SavedPost
+    ApplicationUser "1" --> "*" AdviceLike
+    ApplicationUser "1" --> "*" AdviceComment
+    ApplicationUser "1" --> "*" SavedPost
+```
+
+</details>
+
+<details>
+<summary><b>💬 Chat & logs</b></summary>
+
+```mermaid
+classDiagram
+    direction LR
+    class Conversation {
+        +Guid Id
+        +DateTime CreatedAtUtc
+        +DateTime UpdatedAtUtc
+    }
+    class Message {
+        +long Id
+        +string Content
+        +DateTime CreatedAtUtc
+        +DateTime EditedAtUtc
+        +bool IsDeleted
+    }
+    class MessageStatus {
+        +MessageDeliveryStatus Status
+        +DateTime UpdatedAtUtc
+    }
+    class MessageDeliveryStatus {
+        <<enumeration>>
+        Sent
+        Delivered
+        Read
+    }
+    class Call {
+        +Guid Id
+        +string CallerId
+        +string CalleeId
+        +DateTime StartedAtUtc
+        +DateTime EndedAtUtc
+    }
+    class ChatAuditLog {
+        +long Id
+        +string ActorId
+        +string Action
+        +long MessageId
+        +string Metadata
+        +DateTime CreatedAtUtc
+    }
+    class ApiAuditLog {
+        +Guid Id
+        +DateTime Timestamp
+        +string UserId
+        +string Method
+        +string Endpoint
+        +int StatusCode
+        +long DurationMs
+        +string IpAddress
+    }
+    Patient "1" --> "*" Conversation
+    Doctor "1" --> "*" Conversation
+    Conversation "1" *-- "*" Message
+    ApplicationUser "1" --> "*" Message : sends
+    Message "1" *-- "*" MessageStatus : one per recipient
+    MessageStatus ..> MessageDeliveryStatus
+    Conversation "1" --> "*" Call
+    Conversation "1" ..> "*" ChatAuditLog : logged in
+```
+
+</details>
+
+### 🎭 Use Case Diagram
+
+Who can do what in the system, based on the API endpoints:
+
+```mermaid
+flowchart LR
+    P(("🧑<br/>Patient"))
+
+    subgraph SYS["🩺 Tabibak"]
+        direction TB
+        subgraph ACC["Account (everyone)"]
+            U1(["Register & verify email"])
+            U2(["Log in / refresh token"])
+            U3(["Reset or change password"])
+            U4(["View profile"])
+            U10(["Chat in real time"])
+        end
+        subgraph CARE["Patient care"]
+            U5(["Search & find nearby doctors"])
+            U6(["Get AI specialty recommendation"])
+            U7(["Book / reschedule / cancel appointment"])
+            U8(["Rate doctor"])
+            U9(["View prescriptions & lab results"])
+            U22(["Read advice posts & videos"])
+        end
+        subgraph PRACTICE["Doctor practice"]
+            U11(["Manage schedule & price"])
+            U12(["View dashboard & earnings"])
+            U13(["View patients' medical records"])
+            U23(["Complete appointment"])
+            U14(["Issue digital prescription"])
+            U15(["Upload lab results & files"])
+            U16(["Publish advice posts & videos"])
+        end
+        subgraph ADMIN["Administration"]
+            U17(["Verify or reject doctors"])
+            U18(["Manage users, roles & permissions"])
+            U19(["Moderate content & ratings"])
+            U20(["View analytics & revenue"])
+            U21(["Force-cancel / complete appointments"])
+        end
+    end
+
+    D(("🩺<br/>Doctor"))
+    A(("🛡️<br/>Admin<br/><small>SuperAdmin · ClinicManager<br/>MedicalAdmin · Receptionist</small>"))
+    AI[["🤖 AI model<br/>(Hugging Face)"]]
+    MAIL[["📧 Email<br/>(SMTP)"]]
+
+    P --- U1 & U2 & U3 & U4 & U10
+    P --- U5 & U6 & U7 & U8 & U9 & U22
+    U1 & U2 & U3 & U4 & U10 --- D
+    U11 & U12 & U13 & U23 & U14 & U15 & U16 --- D
+    U2 & U17 & U18 & U19 & U20 & U21 --- A
+
+    U6 -.->|calls| AI
+    U1 -.->|code| MAIL
+    U3 -.->|OTP| MAIL
+    U7 -.->|reminder| MAIL
+
+    classDef actor fill:#FFF8E1,stroke:#F9A825,color:#5D4037
+    classDef ext fill:#ECEFF1,stroke:#607D8B,color:#263238
+    class P,D,A actor
+    class AI,MAIL ext
+```
 
 ---
 
 ## 🔄 Sequence Diagrams
 
-Click a flow to see how a request moves through the system.
+Each diagram follows the real code path. Click a flow to open it.
 
 <details>
-<summary><b>🔐 Authentication & registration</b></summary>
+<summary><b>🔐 Registration with email verification</b></summary>
 
-<img src="Imagse/01_auth_registration.png" alt="Authentication and registration" width="100%" />
-<img src="Imagse/03_authentication_flow.png" alt="Authentication flow" width="100%" />
+Used by both patients (`POST /api/Patient`) and doctors (`POST /api/Doctor`). The account is only created after the emailed code is confirmed.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Patient / Doctor
+    participant C as PatientController
+    participant F as FileService
+    participant A as AuthService
+    participant Cache as MemoryCache
+    participant M as Email (SMTP)
+    participant S as PatientService
+    participant ID as UserManager
+    participant DB as SQL Server
+
+    U->>C: POST /api/Patient (form + profile image)
+    C->>F: Validate image (type, max 5 MB) and save
+    F-->>C: image URL
+    C->>ID: Is the email already used?
+    ID-->>C: no
+    C->>A: CachePendingRegistrationAsync(email, data)
+    A->>Cache: store 6-digit code + registration data (60 s)
+    A->>M: send verification code
+    C-->>U: 200 "check your email"
+
+    U->>C: POST /api/Patient/verify-email (email, code)
+    C->>A: VerifyOtpAndGetPendingAsync
+    A->>Cache: compare code, read data, then remove both
+    alt wrong or expired code
+        A-->>C: invalid
+        C-->>U: 400 Invalid or expired code
+    else code OK
+        C->>S: Add(patient, password)
+        S->>ID: CreateAsync(user) + AddToRole(Patient)
+        S->>DB: insert Patient + empty MedicalRecord
+        S--)M: welcome email (fire and forget)
+        C-->>U: 201 Created
+    end
+```
 
 </details>
 
 <details>
-<summary><b>📅 Appointment lifecycle</b></summary>
+<summary><b>🔑 Login, refresh token & password reset</b></summary>
 
-<img src="Imagse/04_appointment_service.png" alt="Appointment service" width="100%" />
-<img src="Imagse/02_request_lifecycle.png" alt="Request lifecycle" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant C as AuthController
+    participant A as AuthService
+    participant ID as UserManager
+    participant UoW as UnitOfWork
+    participant Cache as MemoryCache
+    participant M as Email (SMTP)
+
+    U->>C: POST /api/Auth/login (email, password)
+    C->>A: Login
+    A->>ID: find user + CheckPasswordAsync
+    alt wrong credentials
+        A-->>C: not authenticated
+        C-->>U: 401
+    else valid
+        A->>A: build JWT (roles + permission claims)
+        A->>UoW: reuse active refresh token or create a new one
+        A-->>C: access token + refresh token
+        C-->>U: 200
+    end
+
+    Note over U,C: When the access token expires
+    U->>C: POST /api/Auth/refresh-token
+    C->>A: RefreshToken(token)
+    A->>UoW: revoke old token, add new token
+    A-->>U: new access + refresh token
+
+    Note over U,C: Forgot password
+    U->>C: POST /forgot-password/request (email)
+    C->>A: create 6-digit code
+    A->>Cache: store code (5 min)
+    A->>M: send code
+    U->>C: POST /forgot-password/verify (email, code, new password)
+    C->>A: check code
+    A->>ID: RemovePassword + AddPassword (new password)
+    A-->>U: password changed
+```
 
 </details>
 
 <details>
-<summary><b>👨‍⚕️ Doctor management</b></summary>
+<summary><b>📅 Booking an appointment</b></summary>
 
-<img src="Imagse/02_doctor_management.png" alt="Doctor management" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Patient
+    participant C as AppointmentController
+    participant S as AppointmentService
+    participant Cache as MemoryCache
+    participant DB as SQL Server
+    participant M as Email (SMTP)
+
+    P->>C: POST /api/Appointment
+    Note right of C: policy CanCreateAppointment
+    C->>S: Add(appointment)
+    S->>S: validate input
+    S->>DB: doctor and patient exist?
+    S->>Cache: doctor schedule (cached 30 min)
+    opt not in cache
+        S->>DB: load active DoctorSchedules
+    end
+    alt outside the doctor's working hours
+        S-->>P: 400 Doctor is not available at this day/time
+    else another appointment within 20 minutes
+        S-->>P: 400 Choose a time at least 20 minutes apart
+    else slot is free
+        S->>S: set ReminderAt (before the appointment)
+        S->>DB: insert Appointment (+ MedicalRecord)
+        opt doctor has a price
+            S->>DB: insert Payment and link it
+        end
+        S--)M: confirmation to patient and doctor
+        S-->>C: appointment
+        C-->>P: 201 Created
+    end
+```
 
 </details>
 
 <details>
-<summary><b>🧑‍🤒 Patient management</b></summary>
+<summary><b>✅ Completing an appointment</b></summary>
 
-<img src="Imagse/03_patient_management.png" alt="Patient management" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Doctor
+    participant C as AppointmentController
+    participant S as AppointmentService
+    participant UoW as UnitOfWork
+    participant DB as SQL Server
+    participant Dash as DashboardDoctorService
+
+    D->>C: PUT /api/Appointment/complete-appointment
+    Note right of C: policy CanCompleteAppointment
+    C->>S: Complete(dto)
+    S->>S: validate request
+    S->>UoW: BEGIN TRANSACTION
+    opt appointment has a medical record
+        S->>UoW: add Prescription
+    end
+    S->>UoW: add Payment
+    S->>UoW: status = Completed, link payment
+    S->>UoW: SaveChanges + COMMIT
+    alt any step fails
+        S->>UoW: ROLLBACK
+        S-->>D: 500 Failed to complete the appointment
+    else success
+        S->>Dash: UpsertDailyEarning(doctor, amount)
+        Dash->>DB: update DoctorEarning for today
+        S-->>D: 200
+    end
+```
 
 </details>
 
 <details>
-<summary><b>💊 Prescriptions</b></summary>
+<summary><b>⭐ Rating a doctor</b></summary>
 
-<img src="Imagse/05_prescriptions.png" alt="Prescriptions" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Patient
+    participant C as AppointmentController
+    participant S as AppointmentService
+    participant DB as SQL Server
+
+    P->>C: POST /api/Appointment/rate (appointmentId, 1-5, comment)
+    C->>S: SubmitRating(dto, patientId)
+    S->>DB: load appointment
+    alt not completed / not your appointment / already rated
+        S-->>P: 400 with the reason
+    else allowed
+        S->>DB: insert DoctorRating
+        S->>DB: recalculate doctor Rating (average) + RatingCount
+        S-->>P: 200
+    end
+```
 
 </details>
 
 <details>
-<summary><b>🏥 Medical records & lab tests</b></summary>
+<summary><b>💊 Issuing a digital prescription</b></summary>
 
-<img src="Imagse/06_medical_records_testing.png" alt="Medical records and lab tests" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Doctor
+    participant C as DigitalPrescriptionController
+    participant S as DigitalPrescriptionService
+    participant DB as SQL Server
+
+    D->>C: GET /api/Medicines?name=... (pick medicines)
+    C-->>D: matching medicines (Egyptian drug database)
+    D->>C: POST /api/DigitalPrescription (medicalRecordId, items)
+    Note right of C: policy CanCreateDigitalPrescription
+    C->>S: Create(dto, doctorId)
+    S->>DB: medical record exists?
+    S->>DB: is it linked to one of this doctor's appointments?
+    alt not your patient's record
+        S-->>D: 403 Forbidden
+    else allowed
+        S->>DB: insert DigitalPrescription + items (medicine, per day, notes)
+        S-->>D: 201 Created
+    end
+    Note over D,DB: The patient reads it with GET /api/DigitalPrescription/patient/{id}
+```
 
 </details>
 
 <details>
-<summary><b>💬 Real-time chat (SignalR)</b></summary>
+<summary><b>🧪 Uploading a lab result</b></summary>
 
-<img src="Imagse/05_signalr_chat.png" alt="SignalR chat" width="100%" />
-<img src="Imagse/07_chat_signalr.png" alt="Chat with SignalR" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Doctor / Staff
+    participant C as TestingController
+    participant F as FileService
+    participant S as TestingService
+    participant DB as SQL Server
+
+    D->>C: POST /api/Testing (title, date, medicalRecordId, file)
+    Note right of C: policy CanCreateMedicalRecord
+    C->>F: validate file (PDF or image, max 10 MB)
+    alt invalid file
+        C-->>D: 400
+    else valid
+        F->>F: save under wwwroot/uploads with a unique name
+        C->>S: Add(testing with file path)
+        S->>DB: insert Testing
+        C-->>D: 201 Created
+    end
+```
 
 </details>
 
 <details>
-<summary><b>📞 WebRTC calls (design)</b></summary>
+<summary><b>💬 Chat: sending a message & receipts</b></summary>
 
-<img src="Imagse/15_webrtc_calls.png" alt="WebRTC calls" width="100%" />
+Messages are sent and loaded over **REST**. The SignalR hub delivers the **delivered** and **read** receipts live.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Sender
+    actor B as Recipient
+    participant Hub as ChatHub (/hubs/chat)
+    participant C as ChatController
+    participant S as MessageService
+    participant DB as SQL Server
+
+    A->>Hub: connect (JWT)
+    Hub->>Hub: add connection to groups of allowed conversations
+    B->>Hub: connect (JWT)
+
+    A->>C: POST /api/Chat/conversations/{id}/messages
+    C->>S: SendMessageAsync
+    S->>DB: insert Message
+    S->>DB: insert MessageStatus = Sent (per recipient)
+    C-->>A: 201 message
+
+    B->>C: GET /api/Chat/conversations/{id}/messages
+    C-->>B: history (with each message's status)
+
+    B->>Hub: MarkAsDelivered(conversationId, messageId)
+    Hub->>S: MarkAsDeliveredAsync
+    S->>DB: status = Delivered
+    Hub-->>A: MessageDelivered
+    B->>Hub: MarkAsRead(conversationId, messageId)
+    Hub->>S: MarkAsReadAsync
+    S->>DB: status = Read
+    Hub-->>A: MessageRead
+```
 
 </details>
 
 <details>
 <summary><b>🤖 AI specialty recommendation</b></summary>
 
-<img src="Imagse/04_ai_recommendation.png" alt="AI recommendation" width="100%" />
-<img src="Imagse/08_ai_integration.png" alt="AI integration" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Patient
+    participant C as DoctorsAiController
+    participant AI as AI model (Hugging Face Space)
+    participant K as AiKeepAliveService
+    participant DC as DoctorController
+
+    loop every 2 minutes
+        K->>AI: ping so the Space stays awake
+    end
+
+    P->>C: POST /api/doctors/ai/recommend-by-symptoms (symptoms text)
+    C->>AI: POST /predict_specialty
+    alt AI unreachable
+        C-->>P: 503 AI service is currently unavailable
+    else answered
+        AI-->>C: predicted specialty
+        C-->>P: same status + body from the model
+    end
+    P->>DC: GET /api/Doctor/search?specialization=...
+    DC-->>P: matching doctors
+```
 
 </details>
 
 <details>
-<summary><b>💳 Payments & files</b></summary>
+<summary><b>⏰ Appointment reminders</b></summary>
 
-<img src="Imagse/09_payment_file_services.png" alt="Payment and file services" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    participant R as AppointmentReminderBackgroundService
+    participant DB as SQL Server
+    participant M as Email (SMTP)
+    actor P as Patient
 
-</details>
-
-<details>
-<summary><b>⏰ Email & reminders</b></summary>
-
-<img src="Imagse/06_reminder_service.png" alt="Reminder service" width="100%" />
-<img src="Imagse/17_email_notification.png" alt="Email notifications" width="100%" />
-
-</details>
-
-<details>
-<summary><b>📊 Doctor dashboard</b></summary>
-
-<img src="Imagse/16_dashboard_service.png" alt="Doctor dashboard" width="100%" />
-
-</details>
-
-<details>
-<summary><b>💾 Data access (Repository + Unit of Work)</b></summary>
-
-<img src="Imagse/07_data_access_layer.png" alt="Data access layer" width="100%" />
-<img src="Imagse/10_data_access_layer.png" alt="Data access layer details" width="100%" />
+    loop every 1 minute
+        R->>DB: appointments where ReminderAt <= now and not ReminderSent
+        loop each due appointment
+            R->>M: send reminder email
+            M-->>P: "Your appointment is coming up"
+            R->>DB: ReminderSent = true
+        end
+    end
+```
 
 </details>
 
 <details>
-<summary><b>🔑 Authorization & security</b></summary>
+<summary><b>🛡️ Doctor verification by an admin</b></summary>
 
-<img src="Imagse/08_authorization_matrix.png" alt="Authorization matrix" width="100%" />
-<img src="Imagse/14_security_optimization.png" alt="Security" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Doctor
+    actor A as Admin
+    participant AC as AdminDashboardController
+    participant S as AdminDashboardService
+    participant DB as SQL Server
+
+    D->>DB: registers with ID number + ID card images (status Pending)
+    A->>AC: GET /api/AdminDashboard/doctors
+    AC-->>A: doctors with their documents
+    alt documents are valid
+        A->>AC: POST /doctors/{id}/verify
+        AC->>S: VerifyDoctor
+        S->>DB: VerificationStatus = Verified, clear RejectionReason
+    else documents are not valid
+        A->>AC: POST /doctors/{id}/reject (reason)
+        AC->>S: RejectDoctor
+        S->>DB: VerificationStatus = Rejected, save reason
+    end
+    AC-->>A: 200
+```
 
 </details>
 
 <details>
-<summary><b>🌐 Middleware pipeline</b></summary>
+<summary><b>🌐 Request pipeline & authorization</b></summary>
 
-<img src="Imagse/11_api_gateway_middleware.png" alt="Middleware pipeline" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Client
+    participant MW as Middlewares
+    participant Auth as Authentication + Authorization
+    participant H as SuperAdminAuthorizationHandler
+    participant Ctl as Controller
+    participant Log as LoggingAsyncMiddleware
+    participant DB as SQL Server
+
+    U->>MW: HTTPS request with Bearer token
+    MW->>MW: exception handler, HTTPS redirect, forwarded headers
+    MW->>Log: start timer
+    Log->>Auth: routing, CORS, then auth (skipped for /swagger)
+    Auth->>Auth: validate JWT, read roles + permission claims
+    Auth->>H: check the endpoint's policy
+    alt user is SuperAdmin
+        H-->>Auth: every requirement succeeds
+    else has the needed permission claim
+        Auth-->>Auth: policy succeeds
+    else missing claim
+        Auth-->>U: 403 Forbidden
+    end
+    Auth->>Ctl: run the action
+    Ctl-->>Log: response
+    Log->>DB: save ApiAuditLog (endpoint, status, duration, user, IP)
+    Log-->>U: response
+    Note over MW,Ctl: Unhandled exceptions become ProblemDetails (GlobalErrorHandling)
+```
+
+</details>
+
+<details>
+<summary><b>🧱 Data access: Controller → Service → Unit of Work</b></summary>
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Ctl as Controller
+    participant S as Service (BusinessLayer)
+    participant V as FluentValidation
+    participant UoW as UnitOfWork
+    participant R as GenericRepository<T>
+    participant Ctx as ApplicationDbContext
+    participant DB as SQL Server
+
+    Ctl->>S: call with a DTO
+    S->>V: validate DTO
+    S->>UoW: e.g. UoW.Appointments
+    UoW->>R: GenericRepository<Appointment>
+    R->>Ctx: Add / Update / Find / query
+    S->>UoW: SaveChanges() (or Begin/Commit/Rollback)
+    UoW->>Ctx: SaveChangesAsync
+    Ctx->>DB: SQL
+    S-->>Ctl: Result<T> (data or error type)
+    Ctl-->>Ctl: map error type to HTTP status
+```
 
 </details>
 
 <details>
 <summary><b>🚀 Startup & initialization</b></summary>
 
-<img src="Imagse/13_startup_initialization.png" alt="Startup and initialization" width="100%" />
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Program.cs
+    participant Env as .env file
+    participant DI as Service registration
+    participant DB as SQL Server
+    participant X as medicines.xlsx
+
+    P->>Env: DotNetEnv.Load("../.env")
+    P->>DI: API, database, Identity, authorization policies, app services, AutoMapper, Serilog
+    P->>DB: apply pending migrations
+    P->>DB: seed roles and permission claims
+    P->>DB: seed admin user
+    P->>DB: seed doctor dashboard test data + test doctor
+    P->>X: read medicines (ClosedXML)
+    alt file found
+        X-->>DB: insert medicines
+    else missing
+        P->>P: log warning, medicine table stays empty
+    end
+    P->>P: build middleware pipeline, map controllers + /hubs/chat
+    P->>P: start background services (reminders, AI keep-alive)
+```
 
 </details>
 
@@ -655,7 +1413,7 @@ Click a flow to see how a request moves through the system.
 
 | Hub | URL | Used for |
 |:--|:--|:--|
-| `ChatHub` | `/hubs/chat` | Join a conversation, receive new messages, delivered and read receipts |
+| `ChatHub` | `/hubs/chat` | Join conversations and push **delivered** / **read** receipts live (messages themselves are sent and loaded over REST) |
 
 ---
 
